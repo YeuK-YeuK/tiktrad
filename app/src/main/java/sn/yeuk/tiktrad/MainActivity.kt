@@ -20,6 +20,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.materialswitch.MaterialSwitch
+import android.content.ActivityNotFoundException
 import com.google.android.material.textfield.TextInputEditText
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -41,6 +43,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var status: TextView
     private lateinit var result: TextView
     private lateinit var btnCopy: MaterialButton
+    private lateinit var btnGoogle: MaterialButton
+    private lateinit var switchGoogle: MaterialSwitch
+    private var lastTranscription = ""
     private var busy = false
     private var lastTranslation = ""
 
@@ -61,6 +66,11 @@ class MainActivity : AppCompatActivity() {
         status = findViewById(R.id.status)
         result = findViewById(R.id.result)
         btnCopy = findViewById(R.id.btnCopy)
+        btnGoogle = findViewById(R.id.btnGoogle)
+        switchGoogle = findViewById(R.id.switchGoogle)
+        switchGoogle.isChecked = prefs.getBoolean("google", true)
+        switchGoogle.setOnCheckedChangeListener { _, _ -> saveSettings() }
+        btnGoogle.setOnClickListener { openInGoogleTranslate(lastTranscription) }
 
         inputKey.setText(prefs.getString("key", ""))
         inputModel.setText(prefs.getString("model", DEFAULT_MODEL))
@@ -137,9 +147,25 @@ class MainActivity : AppCompatActivity() {
         if (media.length() > MAX_INLINE_BYTES) {
             throw Exception("Fichier trop lourd (${media.length() / 1_000_000} Mo). Limite ≈ 19 Mo.")
         }
-        setStatus("Transcription et traduction en cours…")
-        val text = withContext(Dispatchers.IO) { askGemini(media, mediaMime) }
-        showResult(text)
+        if (prefs.getBoolean("google", true)) {
+            setStatus("Transcription de l'audio (Gemini)…")
+            val raw = withContext(Dispatchers.IO) { askGemini(media, mediaMime, PROMPT_TRANSCRIBE) }
+            val langue = raw.substringBefore("TRANSCRIPTION", "").replace("LANGUE", "").trim(':', ' ', '\n')
+            val transcription = raw.substringAfter("TRANSCRIPTION", raw).trimStart(':', ' ', '\n').trim()
+            setStatus("Traduction (Google Traduction)…")
+            val fr = withContext(Dispatchers.IO) { googleTranslate(transcription) }
+            showResult(
+                (if (langue.isNotBlank()) "LANGUE : $langue\n\n" else "") +
+                "TRANSCRIPTION :\n$transcription\n\nTRADUCTION (Google) :\n$fr",
+                transcription, fr
+            )
+        } else {
+            setStatus("Transcription et traduction en cours (Gemini)…")
+            val text = withContext(Dispatchers.IO) { askGemini(media, mediaMime, PROMPT) }
+            val tr = text.substringAfter("TRANSCRIPTION", "").substringBefore("TRADUCTION").trimStart(':', ' ', '\n').trim()
+            val fr = text.substringAfter("TRADUCTION", text).trimStart(':', ' ', '\n').trim()
+            showResult(text, tr, fr)
+        }
     }
 
     private fun launchJob(block: suspend () -> Unit) {
@@ -153,6 +179,7 @@ class MainActivity : AppCompatActivity() {
         progress.visibility = View.VISIBLE
         result.text = ""
         btnCopy.visibility = View.GONE
+        btnGoogle.visibility = View.GONE
         lifecycleScope.launch {
             try {
                 block()
@@ -236,14 +263,14 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- Gemini ----------
 
-    private fun askGemini(file: File, mime: String): String {
+    private fun askGemini(file: File, mime: String, prompt: String): String {
         val key = prefs.getString("key", "")!!.trim()
         val model = prefs.getString("model", DEFAULT_MODEL)!!.trim().ifBlank { DEFAULT_MODEL }
         val b64 = Base64.encodeToString(file.readBytes(), Base64.NO_WRAP)
 
         val parts = JSONArray()
             .put(JSONObject().put("inline_data", JSONObject().put("mime_type", mime).put("data", b64)))
-            .put(JSONObject().put("text", PROMPT))
+            .put(JSONObject().put("text", prompt))
         val body = JSONObject()
             .put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", parts)))
             .put("generationConfig", JSONObject().put("temperature", 0.2))
@@ -272,11 +299,56 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- UI helpers ----------
 
-    private fun showResult(text: String) {
+    private fun showResult(text: String, transcription: String, translation: String) {
         setStatus("Terminé ✔")
         result.text = text
-        lastTranslation = text.substringAfter("TRADUCTION", text).trimStart(':', ' ', '\n').trim()
+        lastTranscription = transcription
+        lastTranslation = translation
         btnCopy.visibility = View.VISIBLE
+        btnGoogle.visibility = if (transcription.isNotBlank()) View.VISIBLE else View.GONE
+    }
+
+    // ---------- Google Traduction ----------
+
+    /** Traduit le texte en français via le service web de Google Traduction. */
+    private fun googleTranslate(text: String): String {
+        if (text.isBlank()) return ""
+        val out = StringBuilder()
+        // découpe en morceaux pour les longs textes
+        for (chunk in text.chunked(1800)) {
+            val conn = (URL("https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=fr&dt=t")
+                .openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                doOutput = true
+                connectTimeout = 20000; readTimeout = 30000
+                setRequestProperty("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
+                setRequestProperty("User-Agent", UA)
+            }
+            conn.outputStream.use { it.write("q=${URLEncoder.encode(chunk, "UTF-8")}".toByteArray()) }
+            if (conn.responseCode !in 200..299) throw Exception("Google Traduction indisponible (${conn.responseCode})")
+            val arr = JSONArray(conn.inputStream.bufferedReader().readText()).getJSONArray(0)
+            for (i in 0 until arr.length()) {
+                val seg = arr.optJSONArray(i) ?: continue
+                out.append(seg.optString(0))
+            }
+        }
+        return out.toString().trim()
+    }
+
+    private fun openInGoogleTranslate(text: String) {
+        if (text.isBlank()) return
+        val app = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            setPackage("com.google.android.apps.translate")
+            putExtra(Intent.EXTRA_TEXT, text)
+        }
+        try {
+            startActivity(app)
+        } catch (e: ActivityNotFoundException) {
+            val url = "https://translate.google.com/?sl=auto&tl=fr&op=translate&text=" +
+                URLEncoder.encode(text.take(4500), "UTF-8")
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        }
     }
 
     private fun setStatus(s: String) { status.text = s }
@@ -285,6 +357,7 @@ class MainActivity : AppCompatActivity() {
         prefs.edit()
             .putString("key", inputKey.text?.toString()?.trim())
             .putString("model", inputModel.text?.toString()?.trim()?.ifBlank { DEFAULT_MODEL })
+            .putBoolean("google", switchGoogle.isChecked)
             .apply()
     }
 
@@ -297,6 +370,16 @@ class MainActivity : AppCompatActivity() {
         const val DEFAULT_MODEL = "gemini-flash-latest"
         const val MAX_INLINE_BYTES = 19_000_000L
         const val UA = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36"
+        val PROMPT_TRANSCRIBE = """
+            Écoute attentivement les paroles prononcées dans cet enregistrement (souvent en arabe : standard, darija, hassaniya, égyptien, golfe, etc.).
+            Transcris-les fidèlement, mot pour mot, dans la langue d'origine (écriture arabe pour l'arabe). Ne traduis pas.
+            Si l'audio ne contient que de la musique sans paroles, écris simplement « (musique sans paroles) ».
+            Réponds exactement dans ce format :
+            LANGUE : ...
+
+            TRANSCRIPTION :
+            ...
+        """.trimIndent()
         val PROMPT = """
             Écoute attentivement les paroles prononcées dans cet enregistrement (souvent en arabe : standard, darija, hassaniya, égyptien, golfe, etc.).
             1) Indique la langue et, si possible, le dialecte.

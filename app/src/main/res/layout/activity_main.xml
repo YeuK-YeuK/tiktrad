@@ -83,6 +83,14 @@
             android:text="Copier la traduction"
             android:visibility="gone" />
 
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnGoogle"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Ouvrir dans Google Traduction"
+            android:visibility="gone" />
+
         <View
             android:layout_width="match_parent"
             android:layout_height="1dp"
@@ -97,11 +105,26 @@
             android:text="Réglages"
             android:textStyle="bold" />
 
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/switchGoogle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:checked="true"
+            android:text="Traduire avec Google Traduction" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:alpha="0.6"
+            android:textSize="12sp"
+            android:text="Gemini retranscrit le son en arabe, Google Traduction traduit le texte en français. Désactivé : Gemini fait tout." />
+
         <com.google.android.material.textfield.TextInputLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:hint="Clé API Gemini (gratuite)">
+            android:hint="Clé API Gemini (gratuite, pour la transcription)">
             <com.google.android.material.textfield.TextInputEditText
                 android:id="@+id/inputKey"
                 android:layout_width="match_parent"
